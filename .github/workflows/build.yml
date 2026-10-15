@@ -1,0 +1,113 @@
+name: Build plugin
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ 'v*' ]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    name: Windows (VST3 + Standalone)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -A x64 -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Download Demucs models
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/models | Out-Null
+          Invoke-WebRequest -Uri "https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/main/ggml-model-htdemucs-4s-f16.bin" -OutFile dist/models/ggml-model-htdemucs-4s-f16.bin
+          Invoke-WebRequest -Uri "https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/main/ggml-model-htdemucs-6s-f16.bin" -OutFile dist/models/ggml-model-htdemucs-6s-f16.bin
+
+      - name: Package
+        shell: pwsh
+        run: |
+          Copy-Item -Recurse "build/XTRACT_artefacts/Release/VST3/WXRST XTRACT.vst3" dist/
+          Copy-Item "build/XTRACT_artefacts/Release/Standalone/WXRST XTRACT.exe" dist/
+          Copy-Item "build/XTRACT_artefacts/Release/Standalone/onnxruntime.dll" dist/
+          @"
+          WXRST XTRACT - Windows install
+
+          VST3 (for FL Studio, as an EFFECT on a mixer insert):
+            Copy the folder "WXRST XTRACT.vst3" into
+            C:\Program Files\Common Files\VST3\
+            then in FL Studio: Options > Manage plugins > Start scan.
+            It shows up as "WXRST XTRACT" under Installed > Effects.
+
+          Models (needed for SEPARATE):
+            Copy the two .bin files from "models" into
+            %APPDATA%\WXRST\models\
+            (or just press the GET MODEL button inside the plugin and it downloads them itself).
+
+          Standalone:
+            Keep "WXRST XTRACT.exe" and "onnxruntime.dll" in the same folder.
+
+          Stems, MIDI and the WXRST inbox land in Documents\WXRST\
+          "@ | Set-Content dist/README.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WXRST-XTRACT-Windows
+          path: dist/
+
+  macos:
+    name: macOS (VST3 + AU + Standalone, universal)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp -R "build/XTRACT_artefacts/Release/VST3/WXRST XTRACT.vst3" dist/
+          cp -R "build/XTRACT_artefacts/Release/AU/WXRST XTRACT.component" dist/
+          cp -R "build/XTRACT_artefacts/Release/Standalone/WXRST XTRACT.app" dist/
+          cat > dist/README.txt <<'TXT'
+          WXRST XTRACT - macOS install
+
+          VST3  -> ~/Library/Audio/Plug-Ins/VST3/
+          AU    -> ~/Library/Audio/Plug-Ins/Components/
+          It is an EFFECT: load it on a mixer insert in FL Studio, hit REC to grab what plays through it,
+          or drop a sample straight onto it.
+
+          The first time you press SEPARATE it downloads the Demucs model (84 MB) into
+          ~/Library/Application Support/WXRST/models/
+          TXT
+          cd dist && zip -ry ../WXRST-XTRACT-macOS.zip . && cd ..
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WXRST-XTRACT-macOS
+          path: WXRST-XTRACT-macOS.zip
+
+  release:
+    name: Attach to GitHub Release
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [windows, macos]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Zip Windows build
+        run: cd artifacts/WXRST-XTRACT-Windows && zip -r ../../WXRST-XTRACT-Windows.zip . && cd ../..
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            WXRST-XTRACT-Windows.zip
+            artifacts/WXRST-XTRACT-macOS/WXRST-XTRACT-macOS.zip
