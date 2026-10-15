@@ -151,7 +151,7 @@ apply_melodia_trick(Eigen::MatrixXf &remaining_energy,
         amplitude /= (i_end - i_start);
 
         // Store note event (start, end, MIDI pitch, amplitude)
-        note_events.push_back({i_start, i_end, freq_idx + MIDI_OFFSET,
+        note_events.push_back({(int) i_start, (int) i_end, (int) (freq_idx + MIDI_OFFSET),
                                  amplitude, std::nullopt});
     }
 }
@@ -337,7 +337,7 @@ output_to_notes_polyphonic(const basic_pitch::InferenceResult &inference_result,
         }
         amplitude /= (i - note_start_idx);
 
-        note_events.push_back({note_start_idx, i, freq_idx + MIDI_OFFSET,
+        note_events.push_back({(int) note_start_idx, (int) i, (int) (freq_idx + MIDI_OFFSET),
                                  amplitude, std::nullopt});
     }
 
@@ -493,7 +493,7 @@ note_events_to_midi(const std::vector<basic_pitch::NoteEvent> &note_events,
     for (const auto &event : midi_events)
     {
         uint32_t delta_ticks = event.tick - last_tick;
-        instrument_track.push_back({delta_ticks, 0, event.message});
+        instrument_track.push_back({(int) delta_ticks, 0, event.message});
         last_tick = event.tick;
     }
 
