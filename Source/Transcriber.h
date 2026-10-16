@@ -17,8 +17,17 @@ namespace Transcriber
     // Must be called once before the first ONNX call (Windows: finds onnxruntime.dll next to the plugin).
     void initRuntime();
 
-    bool notesFromAudio (const juce::AudioBuffer<float>& in, double rate, NoteList& out, juce::String& error);
+    struct NoteOptions
+    {
+        bool cleanup = true;   // drop octave / harmonic ghosts, re-join held notes the model split at other notes' attacks
+        bool mono = false;     // one note at a time (bass lines, leads): the louder of two near-simultaneous notes wins
+        bool debug = false;    // print what the cleanup removed (console tests)
+    };
+    bool notesFromAudio (const juce::AudioBuffer<float>& in, double rate, NoteList& out, juce::String& error, NoteOptions opts = {});
     bool drumsFromAudio (const juce::AudioBuffer<float>& in, double rate, NoteList& out, juce::String& error);
+
+    // Snaps note starts and ends to a 1/snapDiv-beat grid at the given tempo (0 = leave as detected).
+    NoteList snapToGrid (const NoteList& notes, double bpm, int snapDiv);
 
     // Writes a type-0 MIDI file at the given tempo so beat positions line up with the audio in the DAW.
     bool writeMidiFile (const NoteList& notes, double bpm, const juce::File& dest);

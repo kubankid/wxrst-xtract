@@ -79,6 +79,11 @@ struct NoteEvent
     }
 };
 
+// Raw note events (frame indices into the model's time axis) + the seconds each frame maps to.
+std::vector<NoteEvent> infer_note_events(const InferenceResult &inference_result,
+                                         const bool use_melodia_trick = true);
+std::vector<float> frame_times(int n_frames);
+
 std::vector<uint8_t> convert_to_midi(const InferenceResult &inference_result,
                                      const bool use_melodia_trick = true,
                                      const bool include_pitch_bends = true);

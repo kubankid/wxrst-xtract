@@ -278,7 +278,7 @@ XtractEditor::XtractEditor (XtractProcessor& p) : AudioProcessorEditor (&p), pro
     addAndMakeVisible (sourceP);
     addAndMakeVisible (stemsP);
 
-    for (auto* b : { &loadBtn, &recBtn, &playBtn, &loopBtn, &origBtn, &separateBtn, &srcMidiBtn, &srcChords, &srcMelody, &srcDrums })
+    for (auto* b : { &loadBtn, &recBtn, &playBtn, &loopBtn, &origBtn, &separateBtn, &srcMidiBtn, &srcChords, &srcMelody, &srcDrums, &snapBtn, &monoBtn })
         sourceP.addAndMakeVisible (*b);
     sourceP.addAndMakeVisible (sourceWave);
     sourceP.addAndMakeVisible (srcAudioPad);
@@ -333,6 +333,14 @@ XtractEditor::XtractEditor (XtractProcessor& p) : AudioProcessorEditor (&p), pro
     srcMelody.onClick = [this] { proc.sendTo (0, Target::Melody); };
     srcDrums.onClick  = [this] { proc.sendTo (0, Target::Drums); };
 
+    snapBtn.setClickingTogglesState (true);
+    snapBtn.setToggleState (proc.midiSnap.load(), juce::dontSendNotification);
+    snapBtn.setTooltip ("Snap every note to the nearest 1/16 at the MIDI BPM. Off = timing exactly as played.");
+    snapBtn.onClick = [this] { proc.midiSnap.store (snapBtn.getToggleState()); };
+    monoBtn.setClickingTogglesState (true);
+    monoBtn.setToggleState (proc.midiMono.load(), juce::dontSendNotification);
+    monoBtn.setTooltip ("One note at a time (leads, vocals, bass lines). The bass stem is always mono.");
+    monoBtn.onClick = [this] { proc.midiMono.store (monoBtn.getToggleState()); };
     bpmLabel.setEditable (true);
     bpmLabel.setJustificationType (juce::Justification::centred);
     bpmLabel.setColour (juce::Label::backgroundColourId, knobBody);
@@ -416,7 +424,9 @@ void XtractEditor::resized()
     srcMelody.setBounds (row3.removeFromLeft (64)); row3.removeFromLeft (3);
     srcDrums.setBounds (row3.removeFromLeft (64));
     bpmLabel.setBounds (row3.removeFromRight (110));
-    bpmCaption.setBounds (row3.removeFromRight (64));
+    bpmCaption.setBounds (row3.removeFromRight (64)); row3.removeFromRight (10);
+    monoBtn.setBounds (row3.removeFromRight (56)); row3.removeFromRight (4);
+    snapBtn.setBounds (row3.removeFromRight (78));
 
     // --- stem rows ---
     auto st = stemsP.getLocalBounds().reduced (6).withTrimmedTop (24);

@@ -4,6 +4,8 @@
 #include <juce_dsp/juce_dsp.h>
 #include "basicpitch.hpp"
 #include <cmath>
+#include <cstdio>
+#include <algorithm>
 
 #if JUCE_WINDOWS
  #include <windows.h>
@@ -26,7 +28,15 @@ void initRuntime()
 }
 
 // ---------------------------------------------------------------------------
-bool notesFromAudio (const juce::AudioBuffer<float>& in, double rate, NoteList& out, juce::String& error)
+namespace
+{
+    struct RawNote { int s, e, pitch; float amp; bool alive = true; };
+    constexpr int kFrameTol = 3;   // ~35 ms at the model's 86 fps
+
+    const char* noteName (int p) { static const char* n[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" }; return n[(p % 12 + 12) % 12]; }
+}
+
+bool notesFromAudio (const juce::AudioBuffer<float>& in, double rate, NoteList& out, juce::String& error, NoteOptions opts)
 {
     initRuntime();
     out = {};
@@ -35,35 +45,157 @@ bool notesFromAudio (const juce::AudioBuffer<float>& in, double rate, NoteList& 
     auto mono = Separator::resample (in, rate, (double) basic_pitch::constants::SAMPLE_RATE, 1);
     std::vector<float> audio (mono.getReadPointer (0), mono.getReadPointer (0) + mono.getNumSamples());
 
-    std::vector<uint8_t> bytes;
+    std::vector<RawNote> notes;
+    int nFrames = 0;
+    basic_pitch::InferenceResult result;
     try
     {
-        auto result = basic_pitch::ort_inference (audio);
-        bytes = basic_pitch::convert_to_midi (result, true, false);
+        result = basic_pitch::ort_inference (audio);
+        nFrames = (int) result.notes.dimension (0);
+        for (auto& ev : basic_pitch::infer_note_events (result, true))
+            notes.push_back ({ ev.start_idx, ev.end_idx, ev.pitch, ev.amplitude });
     }
     catch (const std::exception& e) { error = juce::String ("Basic Pitch failed: ") + e.what(); return false; }
     catch (...) { error = "Basic Pitch failed"; return false; }
 
-    juce::MemoryInputStream mis (bytes.data(), bytes.size(), false);
-    juce::MidiFile mf;
-    if (! mf.readFrom (mis)) { error = "Could not parse MIDI from Basic Pitch"; return false; }
-    mf.convertTimestampTicksToSeconds();
-    for (int t = 0; t < mf.getNumTracks(); ++t)
+    auto onsetAt = [&] (const RawNote& n)
     {
-        auto* seq = mf.getTrack (t);
-        for (int i = 0; i < seq->getNumEvents(); ++i)
+        const int f = n.pitch - basic_pitch::constants::MIDI_OFFSET;
+        if (f < 0 || f >= (int) result.onsets.dimension (1) || n.s < 0 || n.s >= nFrames) return 0.f;
+        float v = 0.f;
+        for (int t = juce::jmax (0, n.s - 1); t <= juce::jmin (nFrames - 1, n.s + 1); ++t) v = juce::jmax (v, result.onsets (t, f));
+        return v;
+    };
+    auto dbg = [&] (const char* why, const RawNote& n)
+    {
+        if (opts.debug) std::printf ("    cleanup: %-14s %s%d @%.3f len %.3f amp %.2f\n", why, noteName (n.pitch), n.pitch / 12 - 1,
+                                     n.s / 86.13, (n.e - n.s) / 86.13, n.amp);
+    };
+
+    static const int kHarmonics[] = { 12, 19, 24, 28, 31 };
+    // an onset on a held note that lines up with a louder attack a harmonic interval above (or an octave below)
+    // is that other note bleeding into this pitch, not a re-strike
+    auto onsetExplained = [&] (const RawNote& b)
+    {
+        const float ob = onsetAt (b);
+        for (auto& m : notes)
         {
-            auto* ev = seq->getEventPointer (i);
-            if (! ev->message.isNoteOn()) continue;
-            const double start = ev->message.getTimeStamp();
-            double end = start + 0.25;
-            if (ev->noteOffObject != nullptr) end = ev->noteOffObject->message.getTimeStamp();
-            out.notes.push_back ({ start, juce::jmax (0.03, end - start), ev->message.getNoteNumber(), juce::jlimit (1, 127, (int) ev->message.getVelocity()) });
+            if (&m == &b || std::abs (m.s - b.s) > 2) continue;
+            const int iv = m.pitch - b.pitch;
+            const bool harmonic = std::find (std::begin (kHarmonics), std::end (kHarmonics), iv) != std::end (kHarmonics) || iv == -12;
+            if (harmonic && onsetAt (m) >= ob * 0.9f) return true;
         }
+        return false;
+    };
+
+    std::sort (notes.begin(), notes.end(), [] (auto& a, auto& b) { return a.pitch < b.pitch || (a.pitch == b.pitch && a.s < b.s); });
+
+    if (opts.cleanup)
+    {
+        // 1. A held note that the model split where another note attacked: same pitch, (almost) no gap,
+        //    and the second piece has no real onset of its own -> one note.
+        for (size_t i = 0; i + 1 < notes.size(); ++i)
+        {
+            auto& a = notes[i];
+            if (! a.alive) continue;
+            for (size_t j = i + 1; j < notes.size() && notes[j].pitch == a.pitch; ++j)
+            {
+                auto& b = notes[j];
+                if (! b.alive) continue;
+                if (b.s - a.e > kFrameTol) break;
+                if (onsetAt (b) > 0.6f && ! onsetExplained (b)) break;   // a genuine re-strike
+                a.e = juce::jmax (a.e, b.e);
+                a.amp = juce::jmax (a.amp, b.amp);
+                b.alive = false;
+                dbg ("joined", b);
+            }
+        }
+
+        // 2. Octave / harmonic ghosts: a clearly weaker note that starts with a louder one at a harmonic
+        //    interval (2nd..6th harmonic above, or an octave / two below).
+        static const int kIntervals[] = { 12, 19, 24, 28, 31, -12, -24 };
+        for (auto& n : notes)
+        {
+            if (! n.alive) continue;
+            for (auto& m : notes)
+            {
+                if (! m.alive || &m == &n) continue;
+                const int iv = n.pitch - m.pitch;
+                if (std::find (std::begin (kIntervals), std::end (kIntervals), iv) == std::end (kIntervals)) continue;
+                if (std::abs (n.s - m.s) > 2 * kFrameTol) continue;
+                if (m.amp < n.amp * 1.4f) continue;
+                if (m.e < n.e - 2 * kFrameTol && m.amp < n.amp * 2.f) continue;   // the loud one stops much earlier: probably two real notes
+                n.alive = false;
+                dbg ("ghost", n);
+                break;
+            }
+        }
+    }
+
+    if (opts.mono)
+    {
+        std::sort (notes.begin(), notes.end(), [] (auto& a, auto& b) { return a.s < b.s || (a.s == b.s && a.amp > b.amp); });
+        RawNote* cur = nullptr;
+        for (auto& n : notes)
+        {
+            if (! n.alive) continue;
+            if (cur != nullptr && n.s - cur->s <= kFrameTol)
+            {
+                // two notes at once: keep the louder
+                if (n.amp > cur->amp) { cur->alive = false; dbg ("mono (quieter)", *cur); cur = &n; }
+                else { n.alive = false; dbg ("mono (quieter)", n); }
+                continue;
+            }
+            if (cur != nullptr && cur->e > n.s) cur->e = n.s;
+            cur = &n;
+        }
+        for (auto& n : notes) if (n.alive && n.e - n.s < kFrameTol) { n.alive = false; dbg ("mono (cut)", n); }
+    }
+
+    auto times = basic_pitch::frame_times (nFrames + 1);
+    for (auto& n : notes)
+    {
+        if (! n.alive) continue;
+        const double start = juce::jmax (0.0, (double) times[(size_t) juce::jlimit (0, nFrames, n.s)]);
+        const double end = times[(size_t) juce::jlimit (0, nFrames, n.e)];
+        out.notes.push_back ({ start, juce::jmax (0.03, end - start), n.pitch, juce::jlimit (20, 127, (int) std::round (n.amp * 127.f)) });
     }
     std::sort (out.notes.begin(), out.notes.end(), [] (auto& a, auto& b) { return a.startSec < b.startSec || (a.startSec == b.startSec && a.pitch < b.pitch); });
     if (out.notes.empty()) { error = "No notes detected"; return false; }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+NoteList snapToGrid (const NoteList& in, double bpm, int snapDiv)
+{
+    if (snapDiv <= 0 || bpm <= 0.0) return in;
+    NoteList out = in;
+    const double spb = 60.0 / bpm, step = spb / snapDiv;
+    for (auto& n : out.notes)
+    {
+        const double start = std::round (n.startSec / step) * step;
+        double end = std::round ((n.startSec + n.lenSec) / step) * step;
+        if (end < start + step * 0.999) end = start + step;
+        n.startSec = start;
+        n.lenSec = end - start;
+    }
+    std::sort (out.notes.begin(), out.notes.end(), [] (auto& a, auto& b) { return a.startSec < b.startSec || (a.startSec == b.startSec && a.pitch < b.pitch); });
+    // two hits of one pitch that snapped onto the same step collapse into one; an overlap trims the first
+    std::vector<NoteList::Note> clean;
+    for (auto& n : out.notes)
+    {
+        bool merged = false;
+        for (auto it = clean.rbegin(); it != clean.rend() && it->startSec + it->lenSec > n.startSec - 1e-6; ++it)
+        {
+            if (it->pitch != n.pitch) continue;
+            if (std::abs (it->startSec - n.startSec) < 1e-6) { it->lenSec = juce::jmax (it->lenSec, n.lenSec); it->velocity = juce::jmax (it->velocity, n.velocity); merged = true; }
+            else if (it->startSec + it->lenSec > n.startSec + 1e-6) it->lenSec = n.startSec - it->startSec;
+            break;
+        }
+        if (! merged) clean.push_back (n);
+    }
+    out.notes.swap (clean);
+    return out;
 }
 
 // ---------------------------------------------------------------------------

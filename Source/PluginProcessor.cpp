@@ -264,6 +264,29 @@ juce::AudioBuffer<float> XtractProcessor::regionAudio (const Clip& c) const
 }
 
 // ---------------------------------------------------------------------------
+double XtractProcessor::bpmFromName (const juce::String& name)
+{
+    // a number followed by "bpm" (optional space / underscore / dash) wins; else a lone 60..200 token between separators
+    auto lower = name.toLowerCase();
+    int at = lower.indexOf ("bpm");
+    while (at >= 0)
+    {
+        int i = at;
+        while (i > 0 && (lower[i - 1] == ' ' || lower[i - 1] == '_' || lower[i - 1] == '-')) --i;
+        int j = i;
+        while (j > 0 && (juce::CharacterFunctions::isDigit (lower[j - 1]) || lower[j - 1] == '.')) --j;
+        const double v = lower.substring (j, i).getDoubleValue();
+        if (v >= 40.0 && v <= 300.0) return v;
+        at = lower.indexOf (at + 3, "bpm");
+    }
+    juce::StringArray toks;
+    toks.addTokens (lower, " _-()[]", "");
+    for (auto& t : toks)
+        if (t.isNotEmpty() && t.containsOnly ("0123456789") && t.length() == 3)
+            if (const int v = t.getIntValue(); v >= 60 && v <= 200) return v;
+    return 0.0;
+}
+
 bool XtractProcessor::loadSourceFile (const juce::File& f)
 {
     if (! f.existsAsFile()) return false;
@@ -275,6 +298,7 @@ bool XtractProcessor::loadSourceFile (const juce::File& f)
         auto audio = Separator::resample (raw, rate, Separator::kModelRate, 2);
         auto s = std::make_shared<Session>();
         auto base = juce::File::createLegalFileName (f.getFileNameWithoutExtension());
+        if (const double fileBpm = bpmFromName (base); fileBpm > 0.0) manualBpm.store (fileBpm);   // "..._140bpm", "140 BPM ..."
         s->folder = exportsRoot().getChildFile (base);
         s->folder.createDirectory();
         s->source = makeClip ("source", std::move (audio), s->folder);
@@ -368,10 +392,13 @@ void XtractProcessor::toMidi (int row)
         progress.store (0.3f);
         NoteList notes; juce::String err;
         juce::AudioBuffer<float> audio = row == 0 ? regionAudio (*clip) : clip->audio;
+        Transcriber::NoteOptions opts;
+        opts.mono = midiMono.load() || clip->name == "bass";
         const bool ok = drums ? Transcriber::drumsFromAudio (audio, Separator::kModelRate, notes, err)
-                              : Transcriber::notesFromAudio (audio, Separator::kModelRate, notes, err);
+                              : Transcriber::notesFromAudio (audio, Separator::kModelRate, notes, err, opts);
         if (! ok) { setError (err); return; }
         const double tempo = manualBpm.load() > 0.0 ? manualBpm.load() : bpm.load();
+        if (midiSnap.load()) notes = Transcriber::snapToGrid (notes, tempo, 4);
         auto mid = old->folder.getChildFile (clip->name + ".mid");
         if (! Transcriber::writeMidiFile (notes, tempo, mid)) { setError ("Could not write MIDI file"); return; }
         auto nc = std::make_shared<Clip> (*clip);
@@ -461,6 +488,8 @@ void XtractProcessor::getStateInformation (juce::MemoryBlock& dest)
         }
     }
     xml.setAttribute ("manualBpm", manualBpm.load());
+    xml.setAttribute ("midiSnap", midiSnap.load());
+    xml.setAttribute ("midiMono", midiMono.load());
     copyXmlToBinary (xml, dest);
 }
 
@@ -469,6 +498,8 @@ void XtractProcessor::setStateInformation (const void* data, int size)
     auto xml = getXmlFromBinary (data, size);
     if (! xml || ! xml->hasTagName ("XTRACT")) return;
     manualBpm.store (xml->getDoubleAttribute ("manualBpm", 0.0));
+    midiSnap.store (xml->getBoolAttribute ("midiSnap", true));
+    midiMono.store (xml->getBoolAttribute ("midiMono", false));
     juce::File folder (xml->getStringAttribute ("folder"));
     if (! folder.isDirectory()) return;
     const juce::String name = xml->getStringAttribute ("name");

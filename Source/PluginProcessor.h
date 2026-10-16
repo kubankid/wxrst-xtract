@@ -91,6 +91,7 @@ public:
     void toMidi (int row);                               // 0 = source, 1.. = stems
     void sendTo (int row, Target target);                // copies wav + mid into ~/Documents/WXRST/Inbox/<target>/
     static juce::File inboxDir (Target t);
+    static double bpmFromName (const juce::String& name);   // 0 if the file name carries no tempo
     static juce::File exportsRoot();
 
     // ---- model download ----
@@ -100,6 +101,8 @@ public:
     float downloadProgress() const;
     juce::String downloadError() const { juce::SpinLock::ScopedLockType l (statusLock); return dlError; }
 
+    // MIDI conversion options (saved in state). mono also kicks in automatically for the bass stem.
+    std::atomic<bool> midiSnap { true }, midiMono { false };
     double hostBpm() const { return bpm.load(); }
     void setManualBpm (double b) { manualBpm.store (b); }
     double manualBpmValue() const { return manualBpm.load(); }

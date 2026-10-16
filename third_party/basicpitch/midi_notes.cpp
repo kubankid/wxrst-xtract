@@ -42,7 +42,7 @@ find_peaks(const Eigen::Tensor2dXf &onsets)
     return peaks;
 }
 
-static std::vector<float> model_frames_to_time(int n_frames)
+std::vector<float> basic_pitch::frame_times(int n_frames)
 {
     std::vector<float> times(n_frames);
 
@@ -385,7 +385,7 @@ note_events_to_midi(const std::vector<basic_pitch::NoteEvent> &note_events,
     midi_writer.tracks.push_back(meta_track);
 
     // Calculate frame times for each note onset
-    std::vector<float> frame_times = model_frames_to_time(n_times_onsets);
+    std::vector<float> frame_times = basic_pitch::frame_times(n_times_onsets);
 
     // Create a vector to hold all events with their absolute tick times
     struct MidiEvent
@@ -395,8 +395,6 @@ note_events_to_midi(const std::vector<basic_pitch::NoteEvent> &note_events,
     };
 
     std::vector<MidiEvent> midi_events;
-
-    std::cout << "Before iterating over note events" << std::endl;
 
     // Iterate over note events
     for (const auto &[start_idx, end_idx, pitch, amplitude, pitch_bend_opt] :
@@ -463,8 +461,6 @@ note_events_to_midi(const std::vector<basic_pitch::NoteEvent> &note_events,
             {end_tick, libremidi::channel_events::note_off(0, pitch, 0)});
     }
 
-    std::cout << "After iterating over note events" << std::endl;
-
     // Sort all events by their absolute tick times
     std::sort(midi_events.begin(), midi_events.end(),
               [](const MidiEvent &a, const MidiEvent &b)
@@ -480,8 +476,6 @@ note_events_to_midi(const std::vector<basic_pitch::NoteEvent> &note_events,
                              b.message.get_message_type();
                   }
               });
-
-    std::cout << "Now creating instrument track" << std::endl;
 
     // Now, compute delta times and add events to the instrument track
     libremidi::midi_track instrument_track;
@@ -509,8 +503,6 @@ std::vector<uint8_t> basic_pitch::convert_to_midi(
 {
     // Process the unwrapped notes and onsets to detect note events
 
-    std::cout << "output_to_notes_polyphonic" << std::endl;
-
     std::vector<basic_pitch::NoteEvent> note_events =
         output_to_notes_polyphonic(inference_result, use_melodia_trick,
                                    include_pitch_bends);
@@ -523,13 +515,9 @@ std::vector<uint8_t> basic_pitch::convert_to_midi(
 
     int n_times_notes = inference_result.notes.dimension(0);
 
-    std::cout << "note_events_to_midi" << std::endl;
-
     // Convert the detected note events to a MIDI writer object
     libremidi::writer midi_writer =
         note_events_to_midi(note_events, n_times_notes);
-
-    std::cout << "done!" << std::endl;
 
     // Use ostringstream to write MIDI data to a byte stream
     std::ostringstream output(std::ios::binary);
@@ -543,4 +531,11 @@ std::vector<uint8_t> basic_pitch::convert_to_midi(
 
     // Return the MIDI data as bytes
     return midi_data;
+}
+
+std::vector<basic_pitch::NoteEvent> basic_pitch::infer_note_events(
+    const basic_pitch::InferenceResult &inference_result,
+    const bool use_melodia_trick)
+{
+    return output_to_notes_polyphonic(inference_result, use_melodia_trick, false);
 }
