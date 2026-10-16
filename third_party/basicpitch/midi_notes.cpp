@@ -378,10 +378,10 @@ note_events_to_midi(const std::vector<basic_pitch::NoteEvent> &note_events,
     // Track with tempo and time signature
     libremidi::midi_track meta_track;
     meta_track.push_back({0, 0, libremidi::meta_events::tempo(MIDI_TEMPO_US)});
-    meta_track.emplace_back(
+    meta_track.push_back({
         0, 0,
         libremidi::meta_events::time_signature(TIME_SIGNATURE_NUMERATOR,
-                                               TIME_SIGNATURE_DENOMINATOR));
+                                               TIME_SIGNATURE_DENOMINATOR)});
     midi_writer.tracks.push_back(meta_track);
 
     // Calculate frame times for each note onset
@@ -485,9 +485,9 @@ note_events_to_midi(const std::vector<basic_pitch::NoteEvent> &note_events,
 
     // Now, compute delta times and add events to the instrument track
     libremidi::midi_track instrument_track;
-    instrument_track.emplace_back(0, 0,
+    instrument_track.push_back({0, 0,
                                   libremidi::channel_events::program_change(
-                                      0, 4)); // Set program to Electric Piano
+                                      0, 4)}); // Set program to Electric Piano
 
     uint32_t last_tick = 0;
     for (const auto &event : midi_events)
