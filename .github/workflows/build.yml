@@ -52,6 +52,10 @@ jobs:
           Stems, MIDI and the WXRST inbox land in Documents\WXRST\
           "@ | Set-Content dist/README.txt
 
+      - name: Add installer script
+        shell: pwsh
+        run: Copy-Item installer/install-windows.bat dist/
+
       - uses: actions/upload-artifact@v4
         with:
           name: WXRST-XTRACT-Windows
@@ -86,7 +90,15 @@ jobs:
           The first time you press SEPARATE it downloads the Demucs model (84 MB) into
           ~/Library/Application Support/WXRST/models/
           TXT
-          cd dist && zip -ry ../WXRST-XTRACT-macOS.zip . && cd ..
+
+      - name: Sign, notarize and zip
+        env:
+          MACOS_CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          MACOS_CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: ci/sign-mac.sh dist WXRST-XTRACT-macOS.zip
 
       - uses: actions/upload-artifact@v4
         with:
@@ -101,6 +113,12 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
+      - name: Tag must match the CMake project version
+        run: |
+          ver=$(sed -nE 's/^project\([A-Z_]+ VERSION ([0-9.]+).*/\1/p' CMakeLists.txt | head -1)
+          echo "CMake version $ver, tag ${GITHUB_REF_NAME}"
+          [ "v$ver" = "${GITHUB_REF_NAME}" ] || { echo "::error::tag ${GITHUB_REF_NAME} != v$ver (bump project VERSION in CMakeLists.txt)"; exit 1; }
       - uses: actions/download-artifact@v4
         with:
           path: artifacts

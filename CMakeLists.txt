@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(XTRACT VERSION 1.0.0 LANGUAGES C CXX)
+project(XTRACT VERSION 1.1.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -119,6 +119,7 @@ target_sources(XTRACT PRIVATE
 target_include_directories(XTRACT PRIVATE Source)
 
 target_compile_definitions(XTRACT PUBLIC
+    DENNY_VERSION="${PROJECT_VERSION}"
     JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0

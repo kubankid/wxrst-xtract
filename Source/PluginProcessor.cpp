@@ -31,6 +31,7 @@ XtractProcessor::XtractProcessor()
     formats.registerBasicFormats();
     captureBuf.setSize (2, 44100 * 120);
     startThread (juce::Thread::Priority::normal);
+    updater.checkNow();
 
     if (auto env = juce::SystemStats::getEnvironmentVariable ("XTRACT_FILE", {}); env.isNotEmpty())
         loadSourceFile (juce::File (env));

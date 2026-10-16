@@ -78,6 +78,7 @@ public:
     ~XtractEditor() override;
     void paint (juce::Graphics& g) override;
     void resized() override;
+    void mouseDown (const juce::MouseEvent& e) override;
     bool isInterestedInFileDrag (const juce::StringArray& files) override;
     void fileDragEnter (const juce::StringArray&, int, int) override { dropHover = true; repaint(); }
     void fileDragExit (const juce::StringArray&) override { dropHover = false; repaint(); }
@@ -91,6 +92,8 @@ private:
 
     XtractProcessor& proc;
     IceLookAndFeel lnf;
+    UpdateBanner updateBanner { proc.updater };   // after proc
+    juce::Label versionLbl;
     std::unique_ptr<juce::FileChooser> chooser;
     bool dropHover = false;
     int seenVersion = -1;

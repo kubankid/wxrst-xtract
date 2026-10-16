@@ -3,6 +3,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "Separator.h"
 #include "Transcriber.h"
+#include "Updater.h"
 #include <atomic>
 #include <memory>
 #include <functional>
@@ -107,6 +108,7 @@ public:
     void setManualBpm (double b) { manualBpm.store (b); }
     double manualBpmValue() const { return manualBpm.load(); }
     std::atomic<int> sessionVersion { 0 };               // bumps whenever the session changes (UI polls)
+    Updater updater { "xtract", DENNY_VERSION, { "WXRST XTRACT.vst3", "WXRST XTRACT.component" }, "XTRACT" };
 
 private:
     void run() override;

@@ -293,6 +293,17 @@ XtractEditor::XtractEditor (XtractProcessor& p) : AudioProcessorEditor (&p), pro
     bpmCaption.setColour (juce::Label::textColourId, dimText);
     bpmCaption.setJustificationType (juce::Justification::centredRight);
     addAndMakeVisible (statusLabel);
+    addAndMakeVisible (updateBanner);
+    updateBanner.setColours (screen, ice, text);
+    updateBanner.onVisibilityChanged = [this] (bool) { resized(); };
+    addAndMakeVisible (versionLbl);
+    versionLbl.setText ("v" DENNY_VERSION, juce::dontSendNotification);
+    versionLbl.setFont (juce::Font (juce::FontOptions (9.f)));
+    versionLbl.setColour (juce::Label::textColourId, dimText);
+    versionLbl.setJustificationType (juce::Justification::centredRight);
+    versionLbl.setTooltip ("Click to check for updates");
+    versionLbl.setInterceptsMouseClicks (true, false);
+    versionLbl.addMouseListener (this, false);
 
     modelBox.addItem ("4 STEMS: drums / bass / vocals / other", 1);
     modelBox.addItem ("6 STEMS: + guitar / piano (slower, piano is hit or miss)", 2);
@@ -391,11 +402,20 @@ void XtractEditor::styleButton (juce::TextButton& b, bool accent)
     }
 }
 
+void XtractEditor::mouseDown (const juce::MouseEvent& e)
+{
+    if (e.eventComponent == &versionLbl) proc.updater.checkNow (true);
+}
+
 void XtractEditor::resized()
 {
     auto r = getLocalBounds().reduced (10);
     auto header = r.removeFromTop (58);
-    statusLabel.setBounds (header.removeFromRight (520).withTrimmedTop (18));
+    auto right = header.removeFromRight (520);
+    versionLbl.setBounds (right.removeFromTop (14));
+    statusLabel.setBounds (right.withTrimmedTop (4));
+    updateBanner.setBounds (statusLabel.getBounds().withHeight (22).withY (statusLabel.getY() + 2));
+    statusLabel.setVisible (! updateBanner.isVisible());
 
     sourceP.setBounds (r.removeFromTop (196));
     r.removeFromTop (8);
