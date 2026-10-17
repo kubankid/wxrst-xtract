@@ -74,6 +74,8 @@ public:
                     zip = entry.getProperty ("mac", "").toString();
                    #elif JUCE_WINDOWS
                     zip = entry.getProperty ("win", "").toString();
+                    // the Windows build can lag the Mac one (it needs CI); the manifest then says which version the win zip really is
+                    if (auto wv = entry.getProperty ("winVersion", "").toString(); wv.isNotEmpty()) latest = wv;
                    #endif
                     ok = latest.isNotEmpty();
                 }
