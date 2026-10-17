@@ -29,6 +29,9 @@ public:
         {
             dismissed = v.getProperty ("dismissed", "").toString();
             lastCheck = (juce::int64) v.getProperty ("lastCheck", 0.0);
+            cachedLatest = v.getProperty ("latest", "").toString();
+            cachedNotes = v.getProperty ("notes", "").toString();
+            cachedURL = v.getProperty ("url", "").toString();
         }
     }
 
@@ -49,7 +52,9 @@ public:
         saveCache();
         const juce::String url = juce::SystemStats::getEnvironmentVariable ("DENNY_UPDATE_URL", defaultManifestURL());
         const juce::String k = key, cur = current, dis = dismissed;
-        juce::Thread::launch ([st, url, k, cur, dis]
+        const juce::File cache = cacheFile();
+        const juce::int64 checkedAt = lastCheck;
+        juce::Thread::launch ([st, url, k, cur, dis, cache, checkedAt]
         {
             juce::String text;
             juce::File local (url.startsWith ("/") ? url : url.startsWith ("file://") ? url.fromFirstOccurrenceOf ("file://", false, false) : juce::String());
@@ -72,10 +77,17 @@ public:
                    #endif
                     ok = latest.isNotEmpty();
                 }
-            const juce::SpinLock::ScopedLockType l (st->lock);
-            if (! ok) { st->state = State::Failed; st->error = text.isEmpty() ? "offline" : "bad manifest"; return; }
-            st->latest = latest; st->notes = notes; st->zipURL = zip;
-            st->state = (isNewer (latest, cur) && zip.isNotEmpty()) ? State::Available : State::UpToDate;
+            {
+                const juce::SpinLock::ScopedLockType l (st->lock);
+                if (! ok) { st->state = State::Failed; st->error = text.isEmpty() ? "offline" : "bad manifest"; return; }
+                st->latest = latest; st->notes = notes; st->zipURL = zip;
+                st->state = (isNewer (latest, cur) && zip.isNotEmpty()) ? State::Available : State::UpToDate;
+            }
+            // remember the answer so the next 6 h (throttled) opens still show the banner
+            auto* o = new juce::DynamicObject();
+            o->setProperty ("lastCheck", (double) checkedAt); o->setProperty ("dismissed", dis);
+            o->setProperty ("latest", latest); o->setProperty ("notes", notes); o->setProperty ("url", zip);
+            cache.replaceWithText (juce::JSON::toString (juce::var (o)));
         });
     }
 
