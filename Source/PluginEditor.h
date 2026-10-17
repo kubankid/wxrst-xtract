@@ -104,8 +104,8 @@ private:
     Panel stemsP { "STEMS  -  separated parts of the selected region. M = mute, S = solo. TO MIDI gives you notes (drums become a kit pattern)." };
 
     juce::TextButton loadBtn { "LOAD" }, recBtn { "REC" }, playBtn { "PLAY" }, loopBtn { "LOOP" }, origBtn { "HEAR: ORIGINAL" },
-                     separateBtn { "SEPARATE" }, srcMidiBtn { "TO MIDI" }, snapBtn { "SNAP 1/16" }, monoBtn { "MONO" }, srcChords { "CHORDS" }, srcMelody { "MELODY" }, srcDrums { "DRUMS" };
-    juce::ComboBox modelBox;
+                     separateBtn { "SEPARATE" }, srcMidiBtn { "TO MIDI" }, snapBtn { "SNAP 1/16" }, srcChords { "CHORDS" }, srcMelody { "MELODY" }, srcDrums { "DRUMS" };
+    juce::ComboBox modelBox, voicingBox;
     juce::Label bpmLabel, bpmCaption, statusLabel, regionLabel, sendLabel;
     WaveView sourceWave { proc, true };
     FileDragPad srcAudioPad { "DRAG WAV" }, srcMidiPad { "DRAG MIDI" };

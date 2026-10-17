@@ -104,6 +104,7 @@ public:
 
     // MIDI conversion options (saved in state). mono also kicks in automatically for the bass stem.
     std::atomic<bool> midiSnap { true }, midiMono { false };
+    std::atomic<int> midiVoicing { 0 };   // 0 ALL, 1 LEAD, 2 CHORDS, 3 MONO (model-only single line). Bass stem always MONO.
     double hostBpm() const { return bpm.load(); }
     void setManualBpm (double b) { manualBpm.store (b); }
     double manualBpmValue() const { return manualBpm.load(); }

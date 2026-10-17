@@ -278,7 +278,7 @@ XtractEditor::XtractEditor (XtractProcessor& p) : AudioProcessorEditor (&p), pro
     addAndMakeVisible (sourceP);
     addAndMakeVisible (stemsP);
 
-    for (auto* b : { &loadBtn, &recBtn, &playBtn, &loopBtn, &origBtn, &separateBtn, &srcMidiBtn, &srcChords, &srcMelody, &srcDrums, &snapBtn, &monoBtn })
+    for (auto* b : { &loadBtn, &recBtn, &playBtn, &loopBtn, &origBtn, &separateBtn, &srcMidiBtn, &srcChords, &srcMelody, &srcDrums, &snapBtn })
         sourceP.addAndMakeVisible (*b);
     sourceP.addAndMakeVisible (sourceWave);
     sourceP.addAndMakeVisible (srcAudioPad);
@@ -348,10 +348,14 @@ XtractEditor::XtractEditor (XtractProcessor& p) : AudioProcessorEditor (&p), pro
     snapBtn.setToggleState (proc.midiSnap.load(), juce::dontSendNotification);
     snapBtn.setTooltip ("Snap every note to the nearest 1/16 at the MIDI BPM. Off = timing exactly as played.");
     snapBtn.onClick = [this] { proc.midiSnap.store (snapBtn.getToggleState()); };
-    monoBtn.setClickingTogglesState (true);
-    monoBtn.setToggleState (proc.midiMono.load(), juce::dontSendNotification);
-    monoBtn.setTooltip ("One note at a time (leads, vocals, bass lines). The bass stem is always mono.");
-    monoBtn.onClick = [this] { proc.midiMono.store (monoBtn.getToggleState()); };
+    sourceP.addAndMakeVisible (voicingBox);
+    voicingBox.addItem ("NOTES: ALL", 1);
+    voicingBox.addItem ("NOTES: LEAD (top line)", 2);
+    voicingBox.addItem ("NOTES: CHORDS (blocks)", 3);
+    voicingBox.addItem ("NOTES: MONO (bass / vocal)", 4);
+    voicingBox.setSelectedId (proc.midiVoicing.load() + 1, juce::dontSendNotification);
+    voicingBox.setTooltip ("What TO MIDI keeps. ALL = chords + melody tidied up. LEAD = just the top line. CHORDS = one block chord per change. MONO = single line straight from the model (bass stem is always MONO).");
+    voicingBox.onChange = [this] { proc.midiVoicing.store (voicingBox.getSelectedId() - 1); };
     bpmLabel.setEditable (true);
     bpmLabel.setJustificationType (juce::Justification::centred);
     bpmLabel.setColour (juce::Label::backgroundColourId, knobBody);
@@ -445,7 +449,7 @@ void XtractEditor::resized()
     srcDrums.setBounds (row3.removeFromLeft (64));
     bpmLabel.setBounds (row3.removeFromRight (110));
     bpmCaption.setBounds (row3.removeFromRight (64)); row3.removeFromRight (10);
-    monoBtn.setBounds (row3.removeFromRight (56)); row3.removeFromRight (4);
+    voicingBox.setBounds (row3.removeFromRight (196)); row3.removeFromRight (6);
     snapBtn.setBounds (row3.removeFromRight (78));
 
     // --- stem rows ---

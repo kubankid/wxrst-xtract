@@ -68,11 +68,12 @@ static void score (const char* name, const std::vector<GT>& gt, const NoteList& 
 
 int main (int argc, char** argv)
 {
-    bool verbose = false, raw = false, mono = false; int snap = 0; std::vector<juce::String> args;
+    bool verbose = false, raw = false, mono = false; int snap = 0; std::vector<juce::String> args; int voicing = -1;
     for (int i = 1; i < argc; ++i)
     {
         juce::String a (argv[i]);
         if (a == "-v") verbose = true; else if (a == "--raw") raw = true; else if (a == "--mono") mono = true;
+        else if (a == "--all") voicing = 0; else if (a == "--lead") voicing = 1; else if (a == "--chords") voicing = 2;
         else if (a.startsWith ("--snap")) snap = a.fromFirstOccurrenceOf ("=", false, false).getIntValue();
         else args.push_back (a);
     }
@@ -162,6 +163,7 @@ int main (int argc, char** argv)
         const double bpm = args.size() > 1 ? args[1].getDoubleValue() : 120.0;
         NoteList nl; juce::String e;
         if (! Transcriber::notesFromAudio (a, r->sampleRate, nl, e, fileOpts)) { std::printf ("fail: %s\n", e.toRawUTF8()); return 1; }
+        if (voicing >= 0) nl = Transcriber::musicalCleanup (nl, bpm, (Transcriber::Voicing) voicing);
         if (snap > 0) nl = Transcriber::snapToGrid (nl, bpm, snap);
         if (args.size() > 2) Transcriber::writeMidiFile (nl, bpm, juce::File (args[2]));
         std::printf ("%d notes\n", (int) nl.notes.size());

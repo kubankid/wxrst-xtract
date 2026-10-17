@@ -394,11 +394,13 @@ void XtractProcessor::toMidi (int row)
         NoteList notes; juce::String err;
         juce::AudioBuffer<float> audio = row == 0 ? regionAudio (*clip) : clip->audio;
         Transcriber::NoteOptions opts;
-        opts.mono = midiMono.load() || clip->name == "bass";
+        const int voicing = midiVoicing.load();
+        opts.mono = voicing == 3 || midiMono.load() || clip->name == "bass";
         const bool ok = drums ? Transcriber::drumsFromAudio (audio, Separator::kModelRate, notes, err)
                               : Transcriber::notesFromAudio (audio, Separator::kModelRate, notes, err, opts);
         if (! ok) { setError (err); return; }
         const double tempo = manualBpm.load() > 0.0 ? manualBpm.load() : bpm.load();
+        if (! drums && ! opts.mono) notes = Transcriber::musicalCleanup (notes, tempo, (Transcriber::Voicing) juce::jlimit (0, 2, voicing));
         if (midiSnap.load()) notes = Transcriber::snapToGrid (notes, tempo, 4);
         auto mid = old->folder.getChildFile (clip->name + ".mid");
         if (! Transcriber::writeMidiFile (notes, tempo, mid)) { setError ("Could not write MIDI file"); return; }
@@ -491,6 +493,7 @@ void XtractProcessor::getStateInformation (juce::MemoryBlock& dest)
     xml.setAttribute ("manualBpm", manualBpm.load());
     xml.setAttribute ("midiSnap", midiSnap.load());
     xml.setAttribute ("midiMono", midiMono.load());
+    xml.setAttribute ("midiVoicing", midiVoicing.load());
     copyXmlToBinary (xml, dest);
 }
 
@@ -501,6 +504,7 @@ void XtractProcessor::setStateInformation (const void* data, int size)
     manualBpm.store (xml->getDoubleAttribute ("manualBpm", 0.0));
     midiSnap.store (xml->getBoolAttribute ("midiSnap", true));
     midiMono.store (xml->getBoolAttribute ("midiMono", false));
+    midiVoicing.store (xml->getIntAttribute ("midiVoicing", 0));
     juce::File folder (xml->getStringAttribute ("folder"));
     if (! folder.isDirectory()) return;
     const juce::String name = xml->getStringAttribute ("name");

@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include <map>
 
 #if JUCE_WINDOWS
  #include <windows.h>
@@ -409,6 +410,152 @@ bool notesFromAudio (const juce::AudioBuffer<float>& in, double rate, NoteList& 
     std::sort (out.notes.begin(), out.notes.end(), [] (auto& a, auto& b) { return a.startSec < b.startSec || (a.startSec == b.startSec && a.pitch < b.pitch); });
     if (out.notes.empty()) { error = "No notes detected"; return false; }
     return true;
+}
+
+// ---------------------------------------------------------------------------
+namespace
+{
+    // Krumhansl-Schmuckler key profiles
+    const float kMajor[12] = { 6.35f, 2.23f, 3.48f, 2.33f, 4.38f, 4.09f, 2.52f, 5.19f, 2.39f, 3.66f, 2.29f, 2.88f };
+    const float kMinor[12] = { 6.33f, 2.68f, 3.52f, 5.38f, 2.60f, 3.53f, 2.54f, 4.75f, 3.98f, 2.69f, 3.34f, 3.17f };
+
+    int detectKey (const NoteList& nl, bool& minor)   // returns tonic pitch class
+    {
+        float hist[12] = {};
+        for (auto& n : nl.notes) hist[n.pitch % 12] += (float) n.lenSec * (float) n.velocity;
+        float best = -1e9f; int tonic = 0; minor = false;
+        for (int t = 0; t < 12; ++t)
+            for (int mode = 0; mode < 2; ++mode)
+            {
+                float score = 0.f;
+                for (int i = 0; i < 12; ++i) score += hist[(t + i) % 12] * (mode ? kMinor[i] : kMajor[i]);
+                if (score > best) { best = score; tonic = t; minor = mode == 1; }
+            }
+        return tonic;
+    }
+    bool inKey (int pitch, int tonic, bool minor)
+    {
+        static const int maj[7] = { 0, 2, 4, 5, 7, 9, 11 }, min_[7] = { 0, 2, 3, 5, 7, 8, 10 };
+        const int d = ((pitch - tonic) % 12 + 12) % 12;
+        for (int i = 0; i < 7; ++i) if ((minor ? min_[i] : maj[i]) == d) return true;
+        return minor && d == 11;   // raised 7th (harmonic minor) is fair game
+    }
+}
+
+NoteList musicalCleanup (const NoteList& in, double bpm, Voicing voicing)
+{
+    if (in.notes.empty() || bpm <= 0.0) return in;
+    const double beat = 60.0 / bpm, s16 = beat / 4.0, s8 = beat / 2.0;
+    using Note = NoteList::Note;
+    std::vector<Note> notes = in.notes;
+    int maxVel = 1; for (auto& n : notes) maxVel = juce::jmax (maxVel, n.velocity);
+
+    // 1. key filter + blips
+    bool minor = false; const int tonic = detectKey (in, minor);
+    std::vector<Note> kept;
+    for (auto& n : notes)
+    {
+        const bool strong = n.velocity >= maxVel * 0.6;
+        if (n.lenSec < s16 * 0.9 && ! (voicing == Voicing::Lead && strong)) continue;      // blip
+        if (! inKey (n.pitch, tonic, minor) && ! (strong && n.lenSec >= s8)) continue;    // weak out-of-key = junk
+        kept.push_back (n);
+    }
+    notes.swap (kept);
+    std::sort (notes.begin(), notes.end(), [] (auto& a, auto& b) { return a.startSec < b.startSec || (a.startSec == b.startSec && a.pitch < b.pitch); });
+
+    // 2. the top line: per 1/16 slice, the highest note among the strong ones sounding there
+    std::vector<Note> lead;
+    if (voicing != Voicing::Chords)
+    {
+        double end = 0.0; for (auto& n : notes) end = juce::jmax (end, n.startSec + n.lenSec);
+        int curPitch = -1; double curStart = 0.0;
+        for (double t = 0.0; t < end + s16; t += s16)
+        {
+            // loudest note sounding in this slice sets the bar; the top line = highest note within 60% of it
+            int top = -1; int topVel = 0, loudest = 0;
+            for (auto& n : notes)
+                if (n.startSec <= t + s16 * 0.5 && n.startSec + n.lenSec > t + s16 * 0.5) loudest = juce::jmax (loudest, n.velocity);
+            for (auto& n : notes)
+                if (n.startSec <= t + s16 * 0.5 && n.startSec + n.lenSec > t + s16 * 0.5 && n.velocity >= loudest * 0.6 && n.velocity >= maxVel * 0.35)
+                    if (n.pitch > top) { top = n.pitch; topVel = n.velocity; }
+            // a new attack on the same pitch (note starting inside this slice) restarts the lead note
+            bool reattack = false;
+            for (auto& n : notes) if (n.pitch == top && n.startSec >= t && n.startSec < t + s16) reattack = true;
+            if (top != curPitch || reattack)
+            {
+                if (curPitch >= 0 && t - curStart >= s16 * 0.9) lead.push_back ({ curStart, t - curStart, curPitch, topVel > 0 ? topVel : 90 });
+                curPitch = top; curStart = t;
+            }
+        }
+        if (curPitch >= 0 && end - curStart >= s16 * 0.9) lead.push_back ({ curStart, end - curStart, curPitch, 90 });
+        // velocity of each lead note = loudest source note of that pitch overlapping it
+        for (auto& l : lead) { int v = 0; for (auto& n : notes) if (n.pitch == l.pitch && n.startSec < l.startSec + l.lenSec && n.startSec + n.lenSec > l.startSec) v = juce::jmax (v, n.velocity); if (v > 0) l.velocity = v; }
+    }
+    if (voicing == Voicing::Lead) { NoteList out = in; out.notes = lead; return out; }
+
+    // 3. chords: everything that is not the lead pitch at that moment
+    std::vector<Note> chord;
+    for (auto& n : notes)
+    {
+        bool isLead = false;
+        if (voicing == Voicing::Chords)
+            for (auto& l : lead) if (l.pitch == n.pitch && n.startSec < l.startSec + l.lenSec && n.startSec + n.lenSec > l.startSec) { isLead = true; break; }
+        if (! isLead) chord.push_back (n);
+    }
+    std::vector<Note> out;
+    if (! chord.empty())
+    {
+        // a chord CHANGE = a moment where two or more pitch classes start that were not sounding just before.
+        // Everything between two changes is one block chord.
+        std::vector<double> starts;
+        for (auto& n : chord) { bool f = false; for (double t : starts) if (std::abs (t - n.startSec) < s8 * 0.6) f = true; if (! f) starts.push_back (n.startSec); }
+        std::sort (starts.begin(), starts.end());
+        std::vector<double> changes;
+        for (double t : starts)
+        {
+            int fresh = 0;
+            for (auto& n : chord)
+            {
+                if (std::abs (n.startSec - t) >= s8 * 0.6) continue;
+                // a pitch class struck within the last two beats is "this chord" even if its ring-off was cut short
+                bool wasSounding = false;
+                for (auto& o : chord) if (o.pitch % 12 == n.pitch % 12 && o.startSec < t - s8 * 0.6 && o.startSec >= t - beat * 2.0) wasSounding = true;
+                if (! wasSounding) ++fresh;
+            }
+            if (changes.empty()) { changes.push_back (t); continue; }
+            if (fresh >= 2 && t - changes.back() >= beat * 0.9) changes.push_back (t);   // no chord lasts under a beat
+        }
+        double clipEnd = 0.0; for (auto& n : chord) clipEnd = juce::jmax (clipEnd, n.startSec + n.lenSec);
+        changes.push_back (clipEnd + 1.0);
+        for (size_t c = 0; c + 1 < changes.size(); ++c)
+        {
+            const double t0 = changes[c], t1 = juce::jmin (changes[c + 1], t0 + beat * 8.0);
+            // notes that start in this segment, by pitch: the loudest one wins; it starts where it starts (quantised to the
+            // segment start if within a 1/8) and holds to the segment end
+            std::map<int, Note> block;
+            int segMax = 1; for (auto& n : chord) if (n.startSec >= t0 - s8 * 0.6 && n.startSec < t1 - s16) segMax = juce::jmax (segMax, n.velocity);
+            for (auto& n : chord)
+            {
+                if (n.startSec < t0 - s8 * 0.6 || n.startSec >= t1 - s16) continue;
+                if (n.velocity < segMax * 0.35) continue;
+                Note m = n;
+                m.startSec = (n.startSec - t0 < s8 * 0.6) ? t0 : n.startSec;
+                m.lenSec = t1 - m.startSec;
+                auto it = block.find (m.pitch);
+                if (it == block.end() || m.velocity > it->second.velocity || m.startSec < it->second.startSec)
+                { if (it != block.end()) { m.startSec = juce::jmin (m.startSec, it->second.startSec); m.lenSec = t1 - m.startSec; m.velocity = juce::jmax (m.velocity, it->second.velocity); } block[m.pitch] = m; }
+            }
+            // at most 6 voices per block, loudest win
+            std::vector<Note> seg; for (auto& kv : block) seg.push_back (kv.second);
+            std::sort (seg.begin(), seg.end(), [] (auto& x, auto& y) { return x.velocity > y.velocity; });
+            if (seg.size() > 6) seg.resize (6);
+            for (auto& n : seg) if (n.lenSec >= beat * 0.5 || n.velocity >= segMax * 0.8) out.push_back (n);   // no sub-1/8 chord tones
+        }
+    }
+    if (voicing == Voicing::All) for (auto& l : lead) { bool have = false; for (auto& o : out) if (o.pitch == l.pitch && std::abs (o.startSec - l.startSec) < s16 * 0.5) have = true; if (! have) out.push_back (l); }
+    std::sort (out.begin(), out.end(), [] (auto& a, auto& b) { return a.startSec < b.startSec || (a.startSec == b.startSec && a.pitch < b.pitch); });
+    NoteList res = in; res.notes = out;
+    return res;
 }
 
 // ---------------------------------------------------------------------------
