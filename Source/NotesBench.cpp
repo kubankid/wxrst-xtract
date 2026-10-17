@@ -1,8 +1,11 @@
 // Bench: renders known MIDI through a cheap synth, runs the transcriber, scores it.
 //   NotesBench                -> synthetic suites
 //   NotesBench <audio> [bpm]  -> prints the notes for a real file (grid offsets at the given bpm)
-#include <juce_audio_formats/juce_audio_formats.h>
 #include "Transcriber.h"
+#include "Separator.h"
+#include <juce_audio_formats/juce_audio_formats.h>
+#include <juce_dsp/juce_dsp.h>
+#include "basicpitch.hpp"
 #include <cstdio>
 #include <cmath>
 
@@ -74,6 +77,81 @@ int main (int argc, char** argv)
         else args.push_back (a);
     }
     Transcriber::NoteOptions fileOpts; fileOpts.cleanup = ! raw; fileOpts.mono = mono; fileOpts.debug = verbose;
+    // --map <wav> <bpm>: per-16th view of (a) what the audio contains (FFT energy per semitone) and (b) what the model's
+    // frame / onset grids say, so a miss can be blamed on the model or on the note builder.
+    if (args.size() >= 2 && args[0] == "--map")
+    {
+        juce::AudioFormatManager fm; fm.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> r (fm.createReaderFor (juce::File (args[1])));
+        if (! r) { std::printf ("cannot read\n"); return 1; }
+        juce::AudioBuffer<float> a ((int) r->numChannels, (int) r->lengthInSamples);
+        r->read (&a, 0, (int) r->lengthInSamples, 0, true, true);
+        const double bpm = args.size() > 2 ? args[2].getDoubleValue() : 120.0, sr = r->sampleRate;
+        const double step = 60.0 / bpm / 4.0;   // one 16th
+        // (b) model grids
+        auto mono22 = Separator::resample (a, sr, 22050.0, 1);
+        std::vector<float> audio (mono22.getReadPointer (0), mono22.getReadPointer (0) + mono22.getNumSamples());
+        auto res = basic_pitch::ort_inference (audio);
+        const int nF = (int) res.notes.dimension (0);
+        auto times = basic_pitch::frame_times (nF);
+        // (a) FFT
+        constexpr int order = 13, N = 1 << order;
+        juce::dsp::FFT fft (order);
+        std::vector<float> buf ((size_t) N * 2);
+        const float* x = a.getReadPointer (0);
+        const int n = a.getNumSamples();
+        std::printf ("beat   | audio: strongest semitones (dB below frame max)              | model frames>0.3 (onset*)\n");
+        for (double t = 0.0; t + step < n / sr; t += step)
+        {
+            const int off = (int) (t * sr);
+            std::fill (buf.begin(), buf.end(), 0.f);
+            for (int i = 0; i < N && off + i < n; ++i) buf[(size_t) i] = x[off + i] * (0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * i / (N - 1)));
+            fft.performFrequencyOnlyForwardTransform (buf.data());
+            float e[128] = {}; float mx = 1e-9f;
+            for (int k = 2; k < N / 2; ++k)
+            {
+                const double hz = k * sr / N; if (hz < 50 || hz > 4200) continue;
+                const int m = (int) std::round (69 + 12 * std::log2 (hz / 440.0));
+                if (m >= 0 && m < 128) e[m] += buf[(size_t) k] * buf[(size_t) k];
+            }
+            for (float v : e) mx = juce::jmax (mx, v);
+            std::vector<int> idx; for (int m = 36; m < 100; ++m) if (e[m] > mx * 0.02f) idx.push_back (m);
+            std::sort (idx.begin(), idx.end(), [&] (int p, int q) { return e[p] > e[q]; });
+            juce::String line = juce::String (t * bpm / 60.0, 2).paddedLeft (' ', 6) + " | ";
+            float rms = 0; for (int i = 0; i < (int) (step * sr) && off + i < n; ++i) rms += x[off + i] * x[off + i];
+            rms = std::sqrt (rms / juce::jmax (1.0, step * sr));
+            if (rms < 0.003f) line += "(silence)";
+            for (size_t q = 0; q < idx.size() && q < 6; ++q)
+                line += juce::String (NAMES[idx[q] % 12]) + juce::String (idx[q] / 12 - 1) + "(" + juce::String ((int) (10 * std::log10 (e[idx[q]] / mx))) + ") ";
+            line = line.paddedRight (' ', 72) + "| ";
+            // model: frames whose mean prob over this 16th > 0.3
+            int f0 = -1, f1 = -1;
+            for (int f = 0; f < nF; ++f) { if (f0 < 0 && times[(size_t) f] >= t) f0 = f; if (times[(size_t) f] < t + step) f1 = f; }
+            if (f0 >= 0 && f1 >= f0)
+                for (int p = 0; p < 88; ++p)
+                {
+                    float mean = 0, on = 0;
+                    for (int f = f0; f <= f1; ++f) { mean += res.notes (f, p); on = juce::jmax (on, res.onsets (f, p)); }
+                    mean /= (float) (f1 - f0 + 1);
+                    if (mean > 0.3f || on > 0.4f) line += juce::String (NAMES[(p + 21) % 12]) + juce::String ((p + 21) / 12 - 1) + (on > 0.4f ? "*" : "") + " ";
+                }
+            if (args.size() > 3)   // --map <wav> <bpm> <A3,E4,...>: raw frame probability (0-99) for those pitches
+            {
+                juce::StringArray want; want.addTokens (args[3], ",", "");
+                line += "  probs:";
+                for (auto& w : want)
+                {
+                    int pc = -1; for (int i = 0; i < 12; ++i) if (w.startsWith (NAMES[i]) && (pc < 0 || juce::String (NAMES[i]).length() > juce::String (NAMES[pc]).length())) pc = i;
+                    const int oct = w.getTrailingIntValue();
+                    const int p = (oct + 1) * 12 + pc - 21;
+                    float mean = 0; if (f0 >= 0 && f1 >= f0) { for (int f = f0; f <= f1; ++f) mean += res.notes (f, p); mean /= (float) (f1 - f0 + 1); }
+                    line += " " + w + "=" + juce::String ((int) (mean * 99));
+                }
+            }
+            std::printf ("%s\n", line.toRawUTF8());
+        }
+        return 0;
+    }
     if (! args.empty())
     {
         juce::AudioFormatManager fm; fm.registerBasicFormats();
@@ -94,7 +172,7 @@ int main (int argc, char** argv)
             gridAbs += std::abs (beat - g);
             std::printf ("  %7.3f beat %6.2f (%+5.2f)  %-3s%d len %.2f v%d\n", n.startSec, beat, beat - g, NAMES[n.pitch % 12], n.pitch / 12 - 1, n.lenSec * bpm / 60.0, n.velocity);
         }
-        std::printf ("mean |offset from 1/16 grid| = %.3f beats\n", gridAbs / juce::jmax<size_t> (1, nl.notes.size()));
+        std::printf ("mean |offset from 1/16 grid| = %.3f beats\n", gridAbs / (double) std::max<size_t> (1, nl.notes.size()));
         return 0;
     }
 

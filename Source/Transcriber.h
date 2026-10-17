@@ -22,6 +22,7 @@ namespace Transcriber
         bool cleanup = true;   // drop octave / harmonic ghosts, re-join held notes the model split at other notes' attacks
         bool mono = false;     // one note at a time (bass lines, leads): the louder of two near-simultaneous notes wins
         bool debug = false;    // print what the cleanup removed (console tests)
+        bool hybrid = true;    // polyphonic: model finds the attacks, the audio's own spectrum fills in chord tones + durations
     };
     bool notesFromAudio (const juce::AudioBuffer<float>& in, double rate, NoteList& out, juce::String& error, NoteOptions opts = {});
     bool drumsFromAudio (const juce::AudioBuffer<float>& in, double rate, NoteList& out, juce::String& error);

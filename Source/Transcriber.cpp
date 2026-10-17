@@ -36,6 +36,70 @@ namespace
     const char* noteName (int p) { static const char* n[] = { "C","C#","D","D#","E","F","F#","G","G#","A","A#","B" }; return n[(p % 12 + 12) % 12]; }
 }
 
+// ---------------------------------------------------------------------------
+// Hybrid tracker. Basic Pitch is good at note ATTACKS but its "note sounding" confidence collapses on held piano /
+// pad chords (a whole-bar A minor chord came out as a couple of short C4s). So: per model frame, measure the audio's
+// energy per semitone (FFT 8192 @ 44.1k, hop 512 = the model's 86 fps). A note starts where the model has an onset
+// for that pitch, or where a semitone jumps up sharply and is not just a harmonic of a louder lower note. It lasts
+// while that semitone stays within `kHoldDb` of its level at the attack. Velocity = level at the attack.
+namespace
+{
+    constexpr float kHoldDb = 15.f, kFloorDb = -42.f, kAttackDb = 7.f;
+    constexpr int kMaxPerAttack = 6;
+    constexpr int kLo = 36, kHi = 103;   // C2 .. G7 (below C2 the FFT bins no longer separate semitones)
+    constexpr float kQuietDb = 26.f;     // a note settling more than this under the clip's loudest moment is not worth writing
+
+    struct Spectrogram
+    {
+        int frames = 0;
+        std::vector<float> db;                 // [frame * 128 + midi]
+        float at (int f, int m) const { return db[(size_t) f * 128 + (size_t) m]; }
+    };
+
+    Spectrogram analyse (const float* x, int n, double sr)
+    {
+        constexpr int order = 13, N = 1 << order, hop = 512;
+        juce::dsp::FFT fft (order);
+        std::vector<float> win ((size_t) N), buf ((size_t) N * 2);
+        for (int i = 0; i < N; ++i) win[(size_t) i] = 0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * (float) i / (float) (N - 1));
+        // bins -> semitone (nearest), accumulate power
+        std::vector<int> binNote ((size_t) N / 2, -1);
+        for (int k = 1; k < N / 2; ++k)
+        {
+            const double hz = k * sr / N;
+            const int m = (int) std::round (69.0 + 12.0 * std::log2 (hz / 440.0));
+            if (m >= kLo && m <= kHi) binNote[(size_t) k] = m;
+        }
+        Spectrogram sg;
+        sg.frames = juce::jmax (1, (n - N / 4) / hop + 1);
+        sg.db.assign ((size_t) sg.frames * 128, -120.f);
+        std::vector<float> e (128);
+        for (int f = 0; f < sg.frames; ++f)
+        {
+            const int off = f * hop - N / 2;   // window centred on the frame
+            std::fill (buf.begin(), buf.end(), 0.f);
+            for (int i = 0; i < N; ++i) { const int j = off + i; if (j >= 0 && j < n) buf[(size_t) i] = x[j] * win[(size_t) i]; }
+            fft.performFrequencyOnlyForwardTransform (buf.data());
+            std::fill (e.begin(), e.end(), 0.f);
+            for (int k = 1; k < N / 2; ++k) if (binNote[(size_t) k] >= 0) e[(size_t) binNote[(size_t) k]] += buf[(size_t) k] * buf[(size_t) k];
+            for (int m = kLo; m <= kHi; ++m) sg.db[(size_t) f * 128 + (size_t) m] = 10.f * std::log10 (e[(size_t) m] + 1e-10f);
+        }
+        return sg;
+    }
+
+    bool isHarmonicInterval (int iv) { static const int h[] = { 12, 19, 24, 28, 31, 34, 36 }; return std::find (std::begin (h), std::end (h), iv) != std::end (h); }
+
+    // model frame index <-> spectrogram frame: both run at the same 86.13 fps, offset by the model's window shift
+    int modelToSpec (int modelFrame, const std::vector<float>& times, double sr) { return (int) std::round (times[(size_t) modelFrame] * sr / 512.0); }
+    int specToModel (int specFrame, const std::vector<float>& times, double sr)
+    {
+        const double t = specFrame * 512.0 / sr;
+        int lo = 0, hi = (int) times.size() - 1;
+        while (lo < hi) { const int mid = (lo + hi) / 2; if (times[(size_t) mid] < t) lo = mid + 1; else hi = mid; }
+        return lo;
+    }
+}
+
 bool notesFromAudio (const juce::AudioBuffer<float>& in, double rate, NoteList& out, juce::String& error, NoteOptions opts)
 {
     initRuntime();
@@ -52,11 +116,193 @@ bool notesFromAudio (const juce::AudioBuffer<float>& in, double rate, NoteList& 
     {
         result = basic_pitch::ort_inference (audio);
         nFrames = (int) result.notes.dimension (0);
-        for (auto& ev : basic_pitch::infer_note_events (result, true))
-            notes.push_back ({ ev.start_idx, ev.end_idx, ev.pitch, ev.amplitude });
+        if (! opts.hybrid || opts.mono)
+            for (auto& ev : basic_pitch::infer_note_events (result, true))
+                notes.push_back ({ ev.start_idx, ev.end_idx, ev.pitch, ev.amplitude });
     }
     catch (const std::exception& e) { error = juce::String ("Basic Pitch failed: ") + e.what(); return false; }
     catch (...) { error = "Basic Pitch failed"; return false; }
+
+    if (opts.hybrid && ! opts.mono)
+    {
+        constexpr double sr = 44100.0;
+        auto mono44 = Separator::resample (in, rate, sr, 1);
+        const auto sg = analyse (mono44.getReadPointer (0), mono44.getNumSamples(), sr);
+        auto times = basic_pitch::frame_times (nFrames + 1);
+        float globalMax = -120.f;
+        for (float v : sg.db) globalMax = juce::jmax (globalMax, v);
+        const float floorDb = globalMax + kFloorDb;
+
+        // per-pitch "sounding" state while scanning frames
+        struct Live { int start = -1; float startDb = -120.f; int below = 0; int firstBelow = -1; bool fromModel = false; };
+        std::vector<Live> live (128);
+        std::vector<int> lastOnsetSpec (128, -1000);
+        const int nSpec = sg.frames;
+        const int minGap = 5;    // ~60 ms between two attacks of one pitch (a model onset may restart an early spectral start)
+
+        auto modelOnsetAt = [&] (int specFrame, int m)
+        {
+            const int mf = specToModel (specFrame, times, sr), p = m - basic_pitch::constants::MIDI_OFFSET;
+            if (p < 0 || p >= (int) result.onsets.dimension (1)) return 0.f;
+            float v = 0.f;
+            for (int f = juce::jmax (0, mf - 2); f <= juce::jmin (nFrames - 1, mf + 2); ++f) v = juce::jmax (v, result.onsets (f, p));
+            return v;
+        };
+        // the model really heard a note here: an onset peak AND it keeps the pitch "sounding" right after
+        auto modelSupports = [&] (int specFrame, int m)
+        {
+            if (modelOnsetAt (specFrame, m) < 0.5f) return false;
+            const int mf = specToModel (specFrame, times, sr), p = m - basic_pitch::constants::MIDI_OFFSET;
+            float mean = 0.f; int cnt = 0;
+            for (int f = mf; f <= juce::jmin (nFrames - 1, mf + 6); ++f) { mean += result.notes (f, p); ++cnt; }
+            return cnt > 0 && mean / (float) cnt > 0.3f;
+        };
+        auto finish = [&] (int m, int endFrame)
+        {
+            auto& L = live[(size_t) m];
+            if (L.start < 0) return;
+            const bool strong = L.startDb > globalMax - kQuietDb;
+            const int minLen = L.fromModel ? 3 : (strong ? 6 : 9);
+            if (endFrame - L.start >= minLen && L.startDb > floorDb + 10.f)
+            {
+                const float amp = juce::jlimit (0.05f, 1.f, (L.startDb - floorDb) / (globalMax - floorDb));
+                notes.push_back ({ specToModel (L.start, times, sr), specToModel (endFrame, times, sr), m, amp });
+            }
+            L.start = -1;
+        };
+
+        // Harmonic or chord tone? A candidate at a harmonic interval above a note that is attacking at the SAME time
+        // is a harmonic unless the model heard an onset for it too, or it is louder than the fundamental. Above a note
+        // that has been sounding for a while, a fresh attack is its own note unless it is far weaker.
+        auto explainedByHarmonic = [&] (int f, int m, const std::vector<int>& lowerNotes)
+        {
+            for (int n : lowerNotes)
+            {
+                if (! isHarmonicInterval (m - n)) continue;
+                const bool coAttack = live[(size_t) n].start >= f - 8;   // the 186 ms window smears attacks by up to ~90 ms
+                if (coAttack) { if (! modelSupports (f, m) && sg.at (f, m) <= sg.at (f, n) + 2.f) return true; }
+                else if (sg.at (f, m) < sg.at (f, n) - 12.f) return true;
+            }
+            return false;
+        };
+        // a semitone is a real spectral peak (not leakage from a neighbour) when it beats both neighbours
+        auto isPeak = [&] (int f, int m) { return sg.at (f, m) > sg.at (f, m - 1) && sg.at (f, m) >= sg.at (f, m + 1); };
+        auto riseAt = [&] (int f, int m, int span)
+        {
+            float lo = 120.f;
+            for (int k = juce::jmax (0, f - span); k < f; ++k) lo = juce::jmin (lo, sg.at (k, m));
+            return sg.at (f, m) - lo;
+        };
+        // level the note settles to right after the attack (the transient itself overshoots)
+        auto settledDb = [&] (int f, int m)
+        {
+            float sum = 0; int cnt = 0;
+            for (int k = f + 3; k <= juce::jmin (nSpec - 1, f + 7); ++k) { sum += sg.at (k, m); ++cnt; }
+            return cnt > 0 ? sum / (float) cnt : sg.at (f, m);
+        };
+
+        // notes already sounding when the clip starts (a loop cut mid-chord)
+        {
+            const int f = 8;
+            float fmax = -120.f;
+            for (int m = kLo; m <= kHi; ++m) fmax = juce::jmax (fmax, sg.at (f, m));
+            std::vector<int> lower;
+            for (int m = kLo + 1; m < kHi; ++m)
+                if (sg.at (f, m) > fmax - 20.f && isPeak (f, m) && ! explainedByHarmonic (f, m, lower))
+                { live[(size_t) m] = { 0, settledDb (f, m) }; lastOnsetSpec[(size_t) m] = 0; lower.push_back (m); }
+        }
+        for (int f = 8; f < nSpec; ++f)
+        {
+            float fmax = -120.f;
+            for (int m = kLo; m <= kHi; ++m) fmax = juce::jmax (fmax, sg.at (f, m));
+            // which pitches attack here: model onset, or a sharp spectral rise on a real peak
+            struct Att { int m; float level; };
+            std::vector<Att> attacks;
+            bool anyModelOnset = false;
+            for (int m = kLo + 1; m < kHi; ++m)
+            {
+                const float d = sg.at (f, m);
+                if (d < floorDb || d < fmax - 30.f || ! isPeak (f, m)) continue;
+                const bool model = modelOnsetAt (f, m) > 0.5f;
+                if (model) anyModelOnset = true;
+                if ((model && riseAt (f, m, 3) > 2.f) || riseAt (f, m, 6) > kAttackDb) attacks.push_back ({ m, d });
+            }
+            // a model onset on any pitch = a chord is being struck: pull in every strong peak that rose at all
+            if (anyModelOnset)
+                for (int m = kLo + 1; m < kHi; ++m)
+                {
+                    const float d = sg.at (f, m);
+                    if (d < floorDb || d < fmax - 14.f || ! isPeak (f, m)) continue;
+                    bool have = false; for (auto& a : attacks) have |= a.m == m;
+                    if (! have && riseAt (f, m, 4) > 3.f) attacks.push_back ({ m, d });
+                }
+            std::sort (attacks.begin(), attacks.end(), [] (auto& a, auto& b) { return a.m < b.m; });
+            std::vector<int> lower;   // notes already sounding or accepted this frame (for the harmonic test)
+            for (int m = kLo; m <= kHi; ++m) if (live[(size_t) m].start >= 0) lower.push_back (m);
+            int started = 0;
+            for (auto& a : attacks)
+            {
+                const int m = a.m;
+                const bool modelSaysSo = modelSupports (f, m);
+                // the window keeps "rising" for ~100 ms after an attack: no spectral re-trigger in that time
+                if (f - lastOnsetSpec[(size_t) m] < (modelSaysSo ? minGap : 12)) continue;
+                if (! modelSaysSo && explainedByHarmonic (f, m, lower)) continue;
+                if (started >= kMaxPerAttack && ! modelSaysSo) continue;
+                const float settled = settledDb (f, m);
+                if (settled < fmax - 30.f) continue;
+                auto& L = live[(size_t) m];
+                if (modelSaysSo && L.start >= 0 && L.start >= f - 8 && ! L.fromModel)
+                {
+                    // the spectral rise fired early (window smear); the model's timing is the real attack
+                    L.start = f; L.fromModel = true; L.below = 0;
+                    lastOnsetSpec[(size_t) m] = f;
+                    lower.push_back (m);
+                    continue;
+                }
+                finish (m, f);
+                live[(size_t) m] = { f, settled, 0, -1, modelSaysSo };
+                lastOnsetSpec[(size_t) m] = f;
+                lower.push_back (m);
+                ++started;
+                // high harmonics rise a frame or two before the fundamental: anything at a harmonic interval above
+                // this note that started in the last few frames, is not louder, and has no model onset, was its harmonic
+                for (int h = m + 12; h <= kHi; ++h)
+                {
+                    auto& H = live[(size_t) h];
+                    if (H.start < 0 || H.start < f - 8 || H.start == f || ! isHarmonicInterval (h - m)) continue;
+                    if (H.fromModel || sg.at (f, h) > sg.at (f, m) + 2.f) continue;
+                    H.start = -1;
+                }
+            }
+            // sustain / release
+            for (int m = kLo; m <= kHi; ++m)
+            {
+                auto& L = live[(size_t) m];
+                if (L.start < 0 || L.start == f) continue;
+                if (f < L.start + 8) continue;    // settling period
+                const float d = sg.at (f, m);
+                const bool gone = d < L.startDb - kHoldDb || d < floorDb || ! (d >= sg.at (f, m - 1) - 1.f && d >= sg.at (f, m + 1) - 1.f);
+                // a momentary dip (string beating, tremolo) must not end the note: it has to stay gone for ~80 ms
+                if (gone) { if (L.below++ == 0) L.firstBelow = f; if (L.below >= 7) finish (m, L.firstBelow); }
+                else L.below = 0;
+            }
+        }
+        for (int m = kLo; m <= kHi; ++m) finish (m, live[(size_t) m].below > 0 ? live[(size_t) m].firstBelow : nSpec - 1);
+        // the 186 ms analysis window smears an attack onto the neighbouring semitone a few frames early: drop the
+        // weaker of two notes a semitone apart that start within ~50 ms of each other
+        for (auto& n : notes)
+            for (auto& m : notes)
+                if (&n != &m && n.alive && m.alive && std::abs (n.pitch - m.pitch) == 1 && std::abs (n.s - m.s) <= 8 && n.amp < m.amp - 0.05f)
+                { n.alive = false; break; }
+        // two starts of one pitch within ~90 ms = one attack seen twice (spectral precursor + model): keep one
+        std::sort (notes.begin(), notes.end(), [] (auto& a, auto& b) { return a.pitch < b.pitch || (a.pitch == b.pitch && a.s < b.s); });
+        for (size_t i = 0; i + 1 < notes.size(); ++i)
+        {
+            auto& a = notes[i]; auto& b = notes[i + 1];
+            if (a.alive && b.alive && a.pitch == b.pitch && b.s - a.s <= 8) { a.e = juce::jmax (a.e, b.e); a.amp = juce::jmax (a.amp, b.amp); b.alive = false; }
+        }
+        if (opts.debug) std::printf ("    hybrid: %d raw notes (global max %.1f dB)\n", (int) notes.size(), globalMax);
+    }
 
     auto onsetAt = [&] (const RawNote& n)
     {
