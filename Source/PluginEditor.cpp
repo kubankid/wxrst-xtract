@@ -350,9 +350,9 @@ XtractEditor::XtractEditor (XtractProcessor& p) : AudioProcessorEditor (&p), pro
     snapBtn.onClick = [this] { proc.midiSnap.store (snapBtn.getToggleState()); };
     sourceP.addAndMakeVisible (voicingBox);
     voicingBox.addItem ("NOTES: ALL", 1);
-    voicingBox.addItem ("NOTES: LEAD (top line)", 2);
-    voicingBox.addItem ("NOTES: CHORDS (blocks)", 3);
-    voicingBox.addItem ("NOTES: MONO (bass / vocal)", 4);
+    voicingBox.addItem ("NOTES: LEAD", 2);
+    voicingBox.addItem ("NOTES: CHORDS", 3);
+    voicingBox.addItem ("NOTES: MONO", 4);
     voicingBox.setSelectedId (proc.midiVoicing.load() + 1, juce::dontSendNotification);
     voicingBox.setTooltip ("What TO MIDI keeps. ALL = chords + melody tidied up. LEAD = just the top line. CHORDS = one block chord per change. MONO = single line straight from the model (bass stem is always MONO).");
     voicingBox.onChange = [this] { proc.midiVoicing.store (voicingBox.getSelectedId() - 1); };
@@ -447,10 +447,10 @@ void XtractEditor::resized()
     srcChords.setBounds (row3.removeFromLeft (64)); row3.removeFromLeft (3);
     srcMelody.setBounds (row3.removeFromLeft (64)); row3.removeFromLeft (3);
     srcDrums.setBounds (row3.removeFromLeft (64));
-    bpmLabel.setBounds (row3.removeFromRight (110));
-    bpmCaption.setBounds (row3.removeFromRight (64)); row3.removeFromRight (10);
-    voicingBox.setBounds (row3.removeFromRight (196)); row3.removeFromRight (6);
-    snapBtn.setBounds (row3.removeFromRight (78));
+    bpmLabel.setBounds (row3.removeFromRight (96));
+    bpmCaption.setBounds (row3.removeFromRight (60)); row3.removeFromRight (8);
+    voicingBox.setBounds (row3.removeFromRight (168)); row3.removeFromRight (6);
+    snapBtn.setBounds (row3.removeFromRight (72));
 
     // --- stem rows ---
     auto st = stemsP.getLocalBounds().reduced (6).withTrimmedTop (24);
